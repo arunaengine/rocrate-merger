@@ -120,12 +120,20 @@ fn should_strip_property(key: &str, value: &Value) -> bool {
     }
 }
 
+/// Check if a conformsTo URL indicates an RO-Crate
+fn is_rocrate_conformance(id: &str) -> bool {
+    // Match both with and without trailing slash
+    id.starts_with(ROCRATE_PROFILE_PREFIX)
+        || id == "https://w3id.org/ro/crate"
+        || id.starts_with("https://w3id.org/ro/crate#")
+}
+
 /// Check if a conformsTo value points to RO-Crate specification
 fn is_rocrate_conforms_to(value: &Value) -> bool {
     let check_id = |v: &Value| -> bool {
         v.get("@id")
             .and_then(|id| id.as_str())
-            .map(|id| id.starts_with(ROCRATE_PROFILE_PREFIX))
+            .map(is_rocrate_conformance)
             .unwrap_or(false)
     };
 
@@ -137,7 +145,7 @@ fn is_rocrate_conforms_to(value: &Value) -> bool {
             // For now, strip if any is RO-Crate
             arr.iter().any(check_id)
         }
-        Value::String(s) => s.starts_with(ROCRATE_PROFILE_PREFIX),
+        Value::String(s) => is_rocrate_conformance(s),
         _ => false,
     }
 }
@@ -160,7 +168,7 @@ pub fn strip_rocrate_properties(entity: &mut Value) {
                         .filter(|v| {
                             !v.get("@id")
                                 .and_then(|id| id.as_str())
-                                .map(|id| id.starts_with(ROCRATE_PROFILE_PREFIX))
+                                .map(is_rocrate_conformance)
                                 .unwrap_or(false)
                         })
                         .collect();

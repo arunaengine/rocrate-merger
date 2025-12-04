@@ -144,7 +144,31 @@ pub fn rewrite_references(value: &mut serde_json::Value, id_map: &HashMap<String
 ///
 /// "./experiments/" -> "experiments"
 /// "./data/raw/" -> "data/raw"
+/// "https://example.org/crate/experiments/" -> "experiments"
 pub fn namespace_from_folder_id(folder_id: &str) -> String {
+    // Handle absolute URLs by extracting the last path segment
+    if folder_id.starts_with("http://") || folder_id.starts_with("https://") {
+        // Parse as URL and extract the path's last segment(s)
+        let without_trailing = folder_id.trim_end_matches('/');
+        if let Some(pos) = without_trailing.rfind('/') {
+            let segment = &without_trailing[pos + 1..];
+            if !segment.is_empty() {
+                return segment.to_string();
+            }
+        }
+        // Fallback: use the whole path after the host
+        if let Some(start) = folder_id.find("://") {
+            let after_scheme = &folder_id[start + 3..];
+            if let Some(slash_pos) = after_scheme.find('/') {
+                return after_scheme[slash_pos + 1..]
+                    .trim_end_matches('/')
+                    .to_string();
+            }
+        }
+        return folder_id.to_string();
+    }
+
+    // Handle relative paths
     folder_id
         .strip_prefix("./")
         .unwrap_or(folder_id)

@@ -63,6 +63,10 @@ pub fn collect_from_graph(graph: &[Value], namespace: &str) -> CrateCollection {
                 metadata_descriptor = Some(collected);
             }
             IdKind::Absolute => {
+                // Check if this absolute URL is a subcrate reference
+                if is_subcrate_ref(entity) {
+                    subcrate_ids.push(id.to_string());
+                }
                 shared_entities.push(collected);
             }
             IdKind::Relative | IdKind::Fragment => {
@@ -105,6 +109,14 @@ pub fn has_type(entity: &Value, type_name: &str) -> bool {
     extract_types(entity).iter().any(|t| t == type_name)
 }
 
+/// Check if a conformsTo URL indicates an RO-Crate
+fn is_rocrate_conformance(id: &str) -> bool {
+    // Match both with and without trailing slash
+    id.starts_with(ROCRATE_PROFILE_PREFIX)
+        || id == "https://w3id.org/ro/crate"
+        || id.starts_with("https://w3id.org/ro/crate#")
+}
+
 /// Check if an entity conforms to the RO-Crate specification
 pub fn conforms_to_rocrate(entity: &Value) -> bool {
     let conforms_to = match entity.get("conformsTo") {
@@ -115,14 +127,14 @@ pub fn conforms_to_rocrate(entity: &Value) -> bool {
     let check_id = |v: &Value| -> bool {
         v.get("@id")
             .and_then(|id| id.as_str())
-            .map(|id| id.starts_with(ROCRATE_PROFILE_PREFIX))
+            .map(is_rocrate_conformance)
             .unwrap_or(false)
     };
 
     match conforms_to {
         Value::Object(_) => check_id(conforms_to),
         Value::Array(arr) => arr.iter().any(check_id),
-        Value::String(s) => s.starts_with(ROCRATE_PROFILE_PREFIX),
+        Value::String(s) => is_rocrate_conformance(s),
         _ => false,
     }
 }

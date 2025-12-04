@@ -35,3 +35,30 @@ pub enum ConsolidateError {
     #[error("Invalid path: {0}")]
     InvalidPath(PathBuf),
 }
+
+/// Error types for loading RO-Crates from various sources
+#[derive(Error, Debug)]
+pub enum IndexError {
+    #[error("Failed to load crate from {path}: {reason}")]
+    LoadError { path: String, reason: String },
+
+    #[error("Invalid path: {0}")]
+    InvalidPath(PathBuf),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+impl From<IndexError> for ConsolidateError {
+    fn from(err: IndexError) -> Self {
+        match err {
+            IndexError::LoadError { path, reason } => ConsolidateError::LoadError { path, reason },
+            IndexError::InvalidPath(p) => ConsolidateError::InvalidPath(p),
+            IndexError::Io(e) => ConsolidateError::Io(e),
+            IndexError::Json(e) => ConsolidateError::Json(e),
+        }
+    }
+}

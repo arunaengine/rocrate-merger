@@ -9,8 +9,8 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 
 use rocrate_consolidate::{
-    consolidate, to_json_string, ConsolidateError, ConsolidateInput, ConsolidateOptions,
-    MergeCrate, NoOpLoader, SubcrateLoader,
+    consolidate, load_from_url, parse_graph, to_json_string, ConsolidateError, ConsolidateInput,
+    ConsolidateOptions, MergeCrate, NoOpLoader, SubcrateLoader, UrlLoader,
 };
 
 #[derive(Parser)]
@@ -32,8 +32,8 @@ enum Commands {
 
 #[derive(Args)]
 struct ConsolidateArgs {
-    /// Path to RO-Crate directory or ro-crate-metadata.json file
-    source: PathBuf,
+    /// Path to RO-Crate directory, ro-crate-metadata.json file, or URL
+    source: String,
 
     /// Output file (default: stdout)
     #[arg(short, long)]
@@ -54,13 +54,13 @@ struct ConsolidateArgs {
 
 #[derive(Args)]
 struct MergeArgs {
-    /// Path to main RO-Crate (will be the root)
-    main: PathBuf,
+    /// Path or URL to main RO-Crate (will be the root)
+    main: String,
 
-    /// Crates to merge: --merge <path> --as <folder_id> [--name <name>]
+    /// Crates to merge: --merge <path_or_url> --as <folder_id> [--name <name>]
     /// Can be repeated for multiple crates
-    #[arg(long = "merge", value_name = "PATH")]
-    merge_paths: Vec<PathBuf>,
+    #[arg(long = "merge", value_name = "PATH_OR_URL")]
+    merge_sources: Vec<String>,
 
     /// Folder IDs for merged crates (must match number of --merge args)
     #[arg(long = "as", value_name = "FOLDER_ID")]
@@ -87,6 +87,11 @@ struct MergeArgs {
     no_extend_context: bool,
 }
 
+/// Check if a source string is a URL
+fn is_url(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://")
+}
+
 /// Filesystem-based subcrate loader
 struct FilesystemLoader {
     base_path: PathBuf,
@@ -103,6 +108,7 @@ impl SubcrateLoader for FilesystemLoader {
         &self,
         subcrate_id: &str,
         parent_namespace: &str,
+        _subcrate_entity: Option<&Value>,
     ) -> Result<Vec<Value>, ConsolidateError> {
         // Build the path to the subcrate
         let subcrate_path = if parent_namespace.is_empty() {
@@ -121,10 +127,11 @@ impl SubcrateLoader for FilesystemLoader {
 
         // Load the metadata file
         let metadata_path = find_metadata_file(&subcrate_path)?;
-        let content = fs::read_to_string(&metadata_path).map_err(|e| ConsolidateError::LoadError {
-            path: metadata_path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        let content =
+            fs::read_to_string(&metadata_path).map_err(|e| ConsolidateError::LoadError {
+                path: metadata_path.display().to_string(),
+                reason: e.to_string(),
+            })?;
 
         parse_graph(&content, &metadata_path.display().to_string())
     }
@@ -154,8 +161,8 @@ fn find_metadata_file(dir: &PathBuf) -> Result<PathBuf, ConsolidateError> {
     })
 }
 
-/// Load a crate's @graph from a path
-fn load_graph(path: &PathBuf) -> Result<Vec<Value>, ConsolidateError> {
+/// Load a crate's @graph from a path (local file/directory)
+fn load_graph_from_path(path: &PathBuf) -> Result<Vec<Value>, ConsolidateError> {
     let metadata_path = if path.is_dir() {
         find_metadata_file(path)?
     } else if path.is_file() {
@@ -172,19 +179,18 @@ fn load_graph(path: &PathBuf) -> Result<Vec<Value>, ConsolidateError> {
     parse_graph(&content, &metadata_path.display().to_string())
 }
 
-/// Parse @graph from JSON content
-fn parse_graph(content: &str, source: &str) -> Result<Vec<Value>, ConsolidateError> {
-    let doc: Value = serde_json::from_str(content)?;
+/// Load a crate's @graph from a URL
+fn load_graph_from_url(url: &str) -> Result<Vec<Value>, ConsolidateError> {
+    let (_, content) = load_from_url(url)?;
+    parse_graph(&content, url)
+}
 
-    match doc.get("@graph") {
-        Some(Value::Array(arr)) => Ok(arr.clone()),
-        Some(_) => Err(ConsolidateError::InvalidStructure(
-            "@graph is not an array".to_string(),
-        )),
-        None => Err(ConsolidateError::InvalidStructure(format!(
-            "No @graph found in {}",
-            source
-        ))),
+/// Load a crate's @graph from either a URL or local path
+fn load_graph(source: &str) -> Result<Vec<Value>, ConsolidateError> {
+    if is_url(source) {
+        load_graph_from_url(source)
+    } else {
+        load_graph_from_path(&PathBuf::from(source))
     }
 }
 
@@ -205,25 +211,30 @@ fn write_output(content: &str, output: Option<&PathBuf>) -> Result<(), Consolida
 fn run_consolidate(args: ConsolidateArgs) -> Result<(), ConsolidateError> {
     let graph = load_graph(&args.source)?;
 
-    let base_path = if args.source.is_dir() {
-        args.source.clone()
-    } else {
-        args.source.parent().map(|p| p.to_path_buf()).unwrap_or_default()
-    };
-
-    let loader = FilesystemLoader::new(base_path);
     let options = ConsolidateOptions {
         add_subcrate_type: !args.no_subcrate_type,
         extend_context: !args.no_extend_context,
     };
 
-    let result = consolidate(ConsolidateInput::Single(graph), &loader, &options)?;
+    // Choose loader based on source type
+    let loader: Box<dyn SubcrateLoader> = if is_url(&args.source) {
+        eprintln!("Loading from URL: {}", args.source);
+        Box::new(UrlLoader::from_metadata_url(&args.source))
+    } else {
+        let path = PathBuf::from(&args.source);
+        let base_path = if path.is_dir() {
+            path
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+        };
+        Box::new(FilesystemLoader::new(base_path))
+    };
+
+    let result = consolidate(ConsolidateInput::Single(graph), loader.as_ref(), &options)?;
 
     eprintln!(
         "Consolidated {} crates, {} total entities ({} merged)",
-        result.stats.crates_consolidated,
-        result.stats.total_entities,
-        result.stats.merged_entities
+        result.stats.crates_consolidated, result.stats.total_entities, result.stats.merged_entities
     );
 
     let output = to_json_string(&result, args.pretty)?;
@@ -232,10 +243,10 @@ fn run_consolidate(args: ConsolidateArgs) -> Result<(), ConsolidateError> {
 
 fn run_merge(args: MergeArgs) -> Result<(), ConsolidateError> {
     // Validate arguments
-    if args.merge_paths.len() != args.folder_ids.len() {
+    if args.merge_sources.len() != args.folder_ids.len() {
         return Err(ConsolidateError::InvalidStructure(format!(
             "Number of --merge ({}) must match number of --as ({})",
-            args.merge_paths.len(),
+            args.merge_sources.len(),
             args.folder_ids.len()
         )));
     }
@@ -245,8 +256,8 @@ fn run_merge(args: MergeArgs) -> Result<(), ConsolidateError> {
 
     // Load crates to merge
     let mut others = Vec::new();
-    for (i, (path, folder_id)) in args.merge_paths.iter().zip(&args.folder_ids).enumerate() {
-        let graph = load_graph(path)?;
+    for (i, (source, folder_id)) in args.merge_sources.iter().zip(&args.folder_ids).enumerate() {
+        let graph = load_graph(source)?;
         let name = args.names.get(i).cloned();
         others.push(MergeCrate {
             graph,
@@ -272,9 +283,7 @@ fn run_merge(args: MergeArgs) -> Result<(), ConsolidateError> {
 
     eprintln!(
         "Merged {} crates, {} total entities ({} shared entities merged)",
-        result.stats.crates_consolidated,
-        result.stats.total_entities,
-        result.stats.merged_entities
+        result.stats.crates_consolidated, result.stats.total_entities, result.stats.merged_entities
     );
 
     let output = to_json_string(&result, args.pretty)?;

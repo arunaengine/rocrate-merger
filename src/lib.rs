@@ -69,16 +69,20 @@ pub mod collect;
 pub mod consolidate;
 pub mod error;
 pub mod id;
+pub mod loader;
 pub mod merge;
 pub mod transform;
 pub mod vocab;
 
 // Re-export main types for convenience
 pub use crate::consolidate::{
-    consolidate, to_json_string, to_jsonld, ConsolidateInput, ConsolidateOptions,
-    ConsolidateResult, ConsolidateStats, MergeCrate, NoOpLoader, SubcrateLoader,
+    consolidate, parse_graph, to_json_string, to_jsonld, ConsolidateInput, ConsolidateOptions,
+    ConsolidateResult, ConsolidateStats, MergeCrate, NoOpLoader, SubcrateLoader, UrlLoader,
 };
-pub use crate::error::ConsolidateError;
+pub use crate::error::{ConsolidateError, IndexError};
+pub use crate::loader::{
+    load, load_from_directory, load_from_url, load_from_zip, load_with_json, CrateSource,
+};
 pub use crate::vocab::{
     CONSOLIDATED_ENTITIES, CONSOLIDATED_ENTITIES_SHORT, CONSOLIDATE_NS, SUBCRATE_TYPE,
     SUBCRATE_TYPE_SHORT,

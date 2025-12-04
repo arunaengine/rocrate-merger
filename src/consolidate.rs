@@ -61,6 +61,7 @@ pub trait SubcrateLoader {
     /// # Arguments
     /// * `subcrate_id` - The @id of the subcrate reference (e.g., "./experiments/")
     /// * `parent_namespace` - The namespace of the parent crate
+    /// * `subcrate_entity` - Optional reference to the subcrate entity (for extracting subjectOf)
     ///
     /// # Returns
     /// The subcrate's @graph as a Vec of JSON values
@@ -68,6 +69,7 @@ pub trait SubcrateLoader {
         &self,
         subcrate_id: &str,
         parent_namespace: &str,
+        subcrate_entity: Option<&Value>,
     ) -> Result<Vec<Value>, ConsolidateError>;
 }
 
@@ -79,11 +81,99 @@ impl SubcrateLoader for NoOpLoader {
         &self,
         _subcrate_id: &str,
         _parent_namespace: &str,
+        _subcrate_entity: Option<&Value>,
     ) -> Result<Vec<Value>, ConsolidateError> {
         Err(ConsolidateError::LoadError {
             path: "no-op".to_string(),
             reason: "NoOpLoader does not load subcrates".to_string(),
         })
+    }
+}
+
+/// URL-based subcrate loader for remote RO-Crates
+///
+/// This loader resolves subcrate references relative to a base URL.
+/// For example, if the base URL is `https://example.org/crate/` and
+/// a subcrate ID is `./experiments/`, the loader will fetch from
+/// `https://example.org/crate/experiments/ro-crate-metadata.json`.
+///
+/// If the subcrate entity has a `subjectOf` property pointing to the
+/// metadata file, that URL will be used instead.
+pub struct UrlLoader {
+    /// Base URL for resolving relative subcrate paths
+    base_url: String,
+}
+
+impl UrlLoader {
+    /// Create a new URL loader with the given base URL
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
+
+    /// Create from a metadata URL (strips ro-crate-metadata.json if present)
+    pub fn from_metadata_url(url: &str) -> Self {
+        let base = if url.ends_with("ro-crate-metadata.json") {
+            url.rsplit_once('/')
+                .map(|(base, _)| format!("{}/", base))
+                .unwrap_or_else(|| url.to_string())
+        } else {
+            let trimmed = url.trim_end_matches('/');
+            format!("{}/", trimmed)
+        };
+        Self { base_url: base }
+    }
+}
+
+/// Extract metadata URL from a subcrate entity's subjectOf property
+fn extract_metadata_url(entity: Option<&Value>) -> Option<String> {
+    entity?
+        .get("subjectOf")
+        .and_then(|subject_of| {
+            // subjectOf can be an object with @id, or an array of such objects
+            match subject_of {
+                Value::Object(_) => subject_of.get("@id").and_then(|v| v.as_str()),
+                Value::Array(arr) => {
+                    // Find the first entry that looks like a metadata file
+                    arr.iter()
+                        .filter_map(|v| v.get("@id").and_then(|id| id.as_str()))
+                        .find(|id| id.ends_with("ro-crate-metadata.json"))
+                }
+                Value::String(s) => Some(s.as_str()),
+                _ => None,
+            }
+        })
+        .map(|s| s.to_string())
+}
+
+impl SubcrateLoader for UrlLoader {
+    fn load(
+        &self,
+        subcrate_id: &str,
+        _parent_namespace: &str,
+        subcrate_entity: Option<&Value>,
+    ) -> Result<Vec<Value>, ConsolidateError> {
+        // First, try to get the metadata URL from subjectOf
+        let subcrate_url = if let Some(metadata_url) = extract_metadata_url(subcrate_entity) {
+            metadata_url
+        } else if subcrate_id.starts_with("http://") || subcrate_id.starts_with("https://") {
+            // Absolute URL - use it directly, appending ro-crate-metadata.json if needed
+            let base = subcrate_id.trim_end_matches('/');
+            if base.ends_with("ro-crate-metadata.json") {
+                base.to_string()
+            } else {
+                format!("{}/ro-crate-metadata.json", base)
+            }
+        } else {
+            // Relative path - resolve against base URL
+            let relative_path = subcrate_id.trim_start_matches("./").trim_end_matches('/');
+            format!("{}{}/ro-crate-metadata.json", self.base_url, relative_path)
+        };
+
+        // Fetch and parse
+        let (_, content) = crate::loader::load_from_url(&subcrate_url)?;
+        parse_graph(&content, &subcrate_url)
     }
 }
 
@@ -339,8 +429,11 @@ fn collect_hierarchy(
         }
         visited.insert(subcrate_namespace.clone());
 
+        // Find the parent's reference to this subcrate (for extracting subjectOf)
+        let subcrate_entity = graph.iter().find(|e| extract_id(e) == Some(subcrate_id));
+
         // Try to load the subcrate
-        let subcrate_graph = match loader.load(subcrate_id, namespace) {
+        let subcrate_graph = match loader.load(subcrate_id, namespace, subcrate_entity) {
             Ok(g) => g,
             Err(_) => {
                 // Subcrate couldn't be loaded - skip but don't fail
@@ -348,9 +441,6 @@ fn collect_hierarchy(
                 continue;
             }
         };
-
-        // Find the parent's reference to this subcrate (for property merging)
-        let parent_folder = graph.iter().find(|e| extract_id(e) == Some(subcrate_id));
 
         // Recursively collect from subcrate
         let mut subcrate_root: Option<Value> = None;
@@ -394,7 +484,7 @@ fn collect_hierarchy(
 
             let folder = create_subcrate_folder(
                 &folder_id,
-                parent_folder,
+                subcrate_entity,
                 &sub_root,
                 contained_ids,
                 options.add_subcrate_type,
@@ -404,6 +494,22 @@ fn collect_hierarchy(
     }
 
     Ok(())
+}
+
+/// Parse @graph from JSON content
+pub fn parse_graph(content: &str, source: &str) -> Result<Vec<Value>, ConsolidateError> {
+    let doc: Value = serde_json::from_str(content)?;
+
+    match doc.get("@graph") {
+        Some(Value::Array(arr)) => Ok(arr.clone()),
+        Some(_) => Err(ConsolidateError::InvalidStructure(
+            "@graph is not an array".to_string(),
+        )),
+        None => Err(ConsolidateError::InvalidStructure(format!(
+            "No @graph found in {}",
+            source
+        ))),
+    }
 }
 
 /// Build a complete RO-Crate JSON-LD document from consolidation result
