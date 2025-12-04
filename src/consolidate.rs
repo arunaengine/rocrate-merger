@@ -219,6 +219,7 @@ pub fn consolidate(
     let mut all_local: Vec<CollectedEntity> = Vec::new();
     let mut all_shared: Vec<CollectedEntity> = Vec::new();
     let mut subcrate_folders: Vec<Value> = Vec::new();
+    let mut processed_subcrate_ids: HashSet<String> = HashSet::new();
     let mut root_entity: Option<Value> = None;
     let mut metadata_descriptor: Option<Value> = None;
 
@@ -233,6 +234,7 @@ pub fn consolidate(
         &mut all_local,
         &mut all_shared,
         &mut subcrate_folders,
+        &mut processed_subcrate_ids,
         &mut root_entity,
         &mut metadata_descriptor,
         &mut stats,
@@ -269,6 +271,7 @@ pub fn consolidate(
             &mut all_local,
             &mut all_shared,
             &mut subcrate_folders,
+            &mut processed_subcrate_ids,
             &mut None, // Don't override root
             &mut None, // Don't override descriptor
             &mut stats,
@@ -296,6 +299,9 @@ pub fn consolidate(
             subcrate_folders.push(folder);
         }
     }
+
+    // Filter out processed subcrates from shared entities (they're replaced by subcrate folders)
+    all_shared.retain(|e| !processed_subcrate_ids.contains(&e.original_id));
 
     // Merge shared entities (those with absolute IDs appearing in multiple crates)
     let shared_before = all_shared.len();
@@ -363,6 +369,7 @@ fn collect_hierarchy(
     all_local: &mut Vec<CollectedEntity>,
     all_shared: &mut Vec<CollectedEntity>,
     subcrate_folders: &mut Vec<Value>,
+    processed_subcrate_ids: &mut HashSet<String>,
     root_entity: &mut Option<Value>,
     metadata_descriptor: &mut Option<Value>,
     stats: &mut ConsolidateStats,
@@ -394,6 +401,11 @@ fn collect_hierarchy(
         }
         if let Some(collected) = collection.metadata_descriptor {
             *metadata_descriptor = Some(collected.entity);
+        }
+    } else {
+        // This is a subcrate - capture its root for subcrate folder creation
+        if let Some(collected) = collection.root_entity {
+            *root_entity = Some(collected.entity);
         }
     }
 
@@ -456,10 +468,14 @@ fn collect_hierarchy(
             all_local,
             all_shared,
             subcrate_folders,
+            processed_subcrate_ids,
             &mut subcrate_root,
             &mut subcrate_desc,
             stats,
         )?;
+
+        // Mark this subcrate as processed (so we can exclude it from shared entities)
+        processed_subcrate_ids.insert(subcrate_id.clone());
 
         // Create the subcrate folder entity
         if let Some(sub_root) = subcrate_root {

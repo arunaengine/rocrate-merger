@@ -43,6 +43,10 @@ pub fn create_subcrate_folder(
     if let Some(Value::Object(parent)) = parent_folder {
         for (key, value) in parent {
             if key != "@id" && key != "@type" {
+                // Skip properties we want to strip
+                if should_strip_property(key, value) {
+                    continue;
+                }
                 result.insert(key.clone(), value.clone());
             }
         }
